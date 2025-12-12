@@ -1,0 +1,90 @@
+services:
+  db:
+    image: postgres:16
+    container_name: db
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    volumes:
+      - db_data:/var/lib/postgresql/data
+      - ./db/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    ports:
+      - "5432:5432"
+    restart: unless-stopped
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: backend
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: ${DATABASE_URL}
+      DB_HOST: ${DB_HOST}
+      DB_PORT: ${DB_PORT}
+      DB_NAME: ${DB_NAME}
+      DB_USER: ${DB_USER}
+      DB_PASS: ${DB_PASS}
+      BACKEND_PORT: ${BACKEND_PORT}
+      OLLAMA_BASE_URL: http://ollama:11434
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL}
+      OLLAMA_CHAT_MODEL: ${OLLAMA_CHAT_MODEL}
+    volumes:
+      - ./backend/app:/app
+    command: uvicorn main:app --host 0.0.0.0 --port ${BACKEND_PORT} --reload
+    ports:
+      - "${BACKEND_PORT}:${BACKEND_PORT}"
+    restart: unless-stopped
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: frontend
+    working_dir: /app
+    stdin_open: true
+    tty: true
+    volumes:
+      - ./frontend/app:/app
+      - /app/node_modules
+    environment:
+      EXPO_TUNNEL: ${EXPO_TUNNEL}
+      EXPO_DEVTOOLS_LISTEN_ADDRESS: ${EXPO_DEVTOOLS_LISTEN_ADDRESS}
+      REACT_NATIVE_PACKAGER_HOSTNAME: ${REACT_NATIVE_PACKAGER_HOSTNAME}
+      EXPO_PUBLIC_API_HOST: ${EXPO_PUBLIC_API_HOST}
+      EXPO_PUBLIC_API_PORT: ${EXPO_PUBLIC_API_PORT}
+      EXPO_PUBLIC_API_BASE: ${EXPO_PUBLIC_API_BASE}
+    ports:
+      - "19000:19000"  # Expo dev server (Metro)
+      - "19001:19001"  # React Native debugger(old)
+      - "19002:19002"  # Expo web UI
+      - "8081:8081"    # Metro bundler
+    command: >
+      sh -c "
+        npm install &&
+        npx expo start
+      "
+    restart: unless-stopped
+  ollama:
+    image: ollama/ollama
+    container_name: ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama:/root/.ollama
+    restart: unless-stopped
+    entrypoint: ["/bin/bash", "-c", "\
+      ollama serve & \
+      sleep 5 && \
+      ollama pull mxbai-embed-large && \
+      ollama pull llama3 && \
+      wait"]
+volumes:
+  db_data:
+  ollama:
