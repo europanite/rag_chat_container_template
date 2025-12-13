@@ -83,6 +83,12 @@ _DEFAULT_EMBED_MODEL = "nomic-embed-text"
 
 _RAG_CHUNK_SIZE_ENV = "RAG_CHUNK_SIZE"
 
+# Lint-friendly constants
+_HTTP_STATUS_NOT_FOUND = 404
+_JSON_STRING_CONTROL_CHAR_MAX_EXCLUSIVE = 0x20
+_OLLAMA_REQUEST_TIMEOUT_SECONDS = 30
+_OLLAMA_ROUTE_NOT_FOUND_MARKER = "404 page not found"
+
 
 _client = None
 _collection = None
@@ -284,81 +290,101 @@ def chunk_text(text: str, max_tokens: int = _DEFAULT_CHUNK_SIZE) -> list[Documen
 # Embeddings (Ollama)
 # -------------------------------------------------------------------
 
+def _ollama_embed_attempts(model: str, text: str) -> list[tuple[str, dict[str, Any]]]:
+    return [
+        ("/api/embed", {"model": model, "input": text}),        # newer
+        ("/api/embeddings", {"model": model, "prompt": text}),  # older
+    ]
+
+
+def _safe_response_text(response: requests.Response) -> str:
+    try:
+        return response.text or ""
+    except Exception:
+        return ""
+
+
+def _extract_ollama_error_message(response: requests.Response, fallback: str) -> str:
+    try:
+        data = response.json()
+        if isinstance(data, dict) and isinstance(data.get("error"), str):
+            return data["error"]
+    except Exception:
+        pass
+    return fallback
+
+
+def _should_try_next_endpoint(
+    response: requests.Response,
+    model: str,
+    http_err: requests.HTTPError,
+) -> bool:
+    status = getattr(response, "status_code", None)
+    if status != _HTTP_STATUS_NOT_FOUND:
+        return False
+
+    body_text = _safe_response_text(response)
+    err_msg = _extract_ollama_error_message(response, body_text)
+    lower = (err_msg or "").lower()
+
+    # Ollama: 404 can mean "model does not exist"
+    if "model" in lower and ("not found" in lower or "does not exist" in lower):
+        raise RuntimeError(
+            f"Ollama model is not available: {model!r}. "
+            f"Pull it first: `docker compose exec ollama ollama pull {model}`"
+        ) from http_err
+
+    # Missing route => try next endpoint
+    return _OLLAMA_ROUTE_NOT_FOUND_MARKER in (body_text or "").lower()
+
+
+def _extract_embedding_from_response(data: Any) -> list[float] | None:
+    if not isinstance(data, dict):
+        return None
+
+    embeddings = data.get("embeddings")
+    if isinstance(embeddings, list) and embeddings and isinstance(embeddings[0], list):
+        return embeddings[0]
+
+    embedding = data.get("embedding")
+    if isinstance(embedding, list):
+        return embedding
+
+    rows = data.get("data")
+    if isinstance(rows, list) and rows and isinstance(rows[0], dict):
+        emb = rows[0].get("embedding")
+        if isinstance(emb, list):
+            return emb
+
+    return None
+
+
 def _embed_with_ollama(text: str) -> list[float]:
     base_url = _get_ollama_base_url().rstrip("/")
     model = _get_embedding_model()
 
-    attempts = [
-        ("/api/embed", {"model": model, "input": text}),       # newer
-        ("/api/embeddings", {"model": model, "prompt": text}), # older
-    ]
-
     last_error: Exception | None = None
-
-    for endpoint, payload in attempts:
+    for endpoint, payload in _ollama_embed_attempts(model, text):
         url = base_url + endpoint
         try:
-            response = requests.post(url, json=payload, timeout=30)
-
+            response = requests.post(
+                url,
+                json=payload,
+                timeout=_OLLAMA_REQUEST_TIMEOUT_SECONDS,
+            )
             try:
                 response.raise_for_status()
             except requests.HTTPError as http_err:
-                status = getattr(response, "status_code", None)
-
-                body_text = ""
-                try:
-                    body_text = response.text or ""
-                except Exception:
-                    body_text = ""
-
-                # Ollama: 404 can mean "model does not exist"
-                if status == 404:
-                    err_msg = ""
-                    try:
-                        data = response.json()
-                        if isinstance(data, dict) and isinstance(data.get("error"), str):
-                            err_msg = data["error"]
-                    except Exception:
-                        err_msg = body_text
-
-                    lower = (err_msg or "").lower()
-                    if "model" in lower and ("not found" in lower or "does not exist" in lower):
-                        raise RuntimeError(
-                            f"Ollama model is not available: {model!r}. "
-                            f"Pull it first: `docker compose exec ollama ollama pull {model}`"
-                        ) from http_err
-
-                    # If it really looks like a missing route, try next endpoint
-                    if "404 page not found" in (body_text or "").lower():
-                        last_error = http_err
-                        continue
-
-                raise  # other HTTP errors
+                if _should_try_next_endpoint(response, model, http_err):
+                    last_error = http_err
+                    continue
+                raise
 
             data = response.json()
-
-            # parse embedding (existing logic)
-            embedding = None
-            if isinstance(data, dict) and "embeddings" in data:
-                embeddings = data.get("embeddings")
-                if isinstance(embeddings, list) and embeddings and isinstance(embeddings[0], list):
-                    embedding = embeddings[0]
-            if embedding is None and isinstance(data, dict) and "embedding" in data:
-                raw = data.get("embedding")
-                if isinstance(raw, list):
-                    embedding = raw
-            if embedding is None and isinstance(data, dict) and "data" in data:
-                rows = data.get("data")
-                if isinstance(rows, list) and rows and isinstance(rows[0], dict):
-                    raw = rows[0].get("embedding")
-                    if isinstance(raw, list):
-                        embedding = raw
-
-            if not isinstance(embedding, list) or not embedding:
-                raise ValueError(f"Unexpected embedding response format at {endpoint}")
-
-            return embedding
-
+            embedding = _extract_embedding_from_response(data)
+            if isinstance(embedding, list) and embedding:
+                return embedding
+            raise ValueError(f"Unexpected embedding response format at {endpoint}")
         except Exception as exc:
             last_error = exc
 
@@ -565,7 +591,7 @@ def _escape_control_chars_inside_json_strings(raw: str) -> str:
             continue
 
         code = ord(ch)
-        if code < 0x20:
+        if code < _JSON_STRING_CONTROL_CHAR_MAX_EXCLUSIVE:
             if ch == "\n":
                 out.append("\\n")
             elif ch == "\r":
@@ -751,13 +777,12 @@ def ingest_json_dir(docs_dir: str) -> dict[str, int]:
 
 def reset_collection() -> None:
     """Delete and recreate the Chroma collection (best-effort)."""
-    global _collection
     name = _get_chroma_collection_name()
     try:
         _get_chroma_client().delete_collection(name)
     except Exception:
         pass
-    _collection = None
+    globals()["_collection"] = None
     _get_collection()
 
 
