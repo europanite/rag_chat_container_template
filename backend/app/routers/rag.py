@@ -12,27 +12,32 @@ from rag_store import RAGChunk
 
 logger = logging.getLogger(__name__)
 
+router = APIRouter(prefix="/rag", tags=["rag"])
+
 _session = requests.Session()
 
-router = APIRouter(prefix="/rag", tags=["rag"])
+
+def _truthy(value: str | None) -> bool:
+    if value is None:
+        return False
+    return value.strip().lower() in {"1", "true", "yes", "y", "on"}
 
 
 # -------------------------------------------------------------------
-# Pydantic models
+# Request / response models
 # -------------------------------------------------------------------
 
 
 class IngestRequest(BaseModel):
-    documents: list[str] = Field(
-        ..., description="List of raw document texts."
-    )
+    documents: list[str] = Field(..., description="Raw texts to ingest into the vector store.")
+
 
 class IngestResponse(BaseModel):
-    ingested: int = Field(..., description="Number of successfully ingested documents.")
+    ingested: int
 
 
 class QueryRequest(BaseModel):
-    question: str = Field(..., min_length=1, description="User question.")
+    question: str = Field(..., min_length=1)
     top_k: int = Field(
         5,
         ge=1,
@@ -41,9 +46,30 @@ class QueryRequest(BaseModel):
     )
 
 
+class ChunkOut(BaseModel):
+    id: str | None = None
+    text: str
+    distance: float | None = None
+    metadata: dict = Field(default_factory=dict)
+
+
 class QueryResponse(BaseModel):
     answer: str
     context: list[str]
+    chunks: list[ChunkOut] = Field(default_factory=list)
+
+
+class StatusResponse(BaseModel):
+    docs_dir: str
+    json_files: int
+    chunks_in_store: int
+    files: list[str] = Field(default_factory=list)
+
+
+class ReindexResponse(BaseModel):
+    documents: int
+    chunks: int
+    files: int
 
 
 # -------------------------------------------------------------------
@@ -60,18 +86,14 @@ def _get_ollama_base_url() -> str:
 
 
 def _call_ollama_chat(*, question: str, context: str) -> str:
-    """
-    Call Ollama's /api/chat endpoint with a simple RAG-style prompt.
-    """
+    """Call Ollama's /api/chat endpoint with a simple RAG-style prompt."""
     base_url = _get_ollama_base_url()
     model = _get_ollama_chat_model()
 
     prompt = (
-        "You are a helpful assistant for questions about various topics.\n\n"
-        "Use ONLY the information in the following context to answer the question.\n\n"
+        "Use the context below aside from general knowledge to answer the question.\n\n"
         f"Context:\n{context}\n\n"
-        f"Question: {question}\n\n"
-        "Answer in English."
+        f"Question:\n{question}\n"
     )
 
     payload = {
@@ -96,30 +118,40 @@ def _call_ollama_chat(*, question: str, context: str) -> str:
     return content
 
 
+def _chunk_id_from_metadata(meta: dict) -> str | None:
+    doc_id = meta.get("doc_id")
+    idx = meta.get("chunk_index")
+    if idx is None:
+        idx = meta.get("index")
+    if isinstance(doc_id, str) and doc_id and idx is not None:
+        return f"{doc_id}:{idx}"
+    return None
+
+
 # -------------------------------------------------------------------
 # Routes
 # -------------------------------------------------------------------
 
 
 @router.post("/ingest", response_model=IngestResponse)
-def ingest_documents(request: IngestRequest) -> IngestResponse:
+def ingest_rag(request: IngestRequest) -> IngestResponse:
+    """(Optional) Ingest raw texts (kept for backwards-compat / testing).
+
+    In production, prefer indexing from JSON files via /rag/reindex or startup auto-index.
     """
-    Ingest a list of documents into the vector store.
-    """
-    docs = request.documents or []
+    docs = [d.strip() for d in request.documents if d and d.strip()]
 
     if not docs:
         # test_rag_ingest_empty_documents_returns_400
         raise HTTPException(
             status_code=HTTPStatus.BAD_REQUEST,
-            detail="documents list must not be empty",
+            detail="No documents provided.",
         )
 
     successes = 0
     last_error: Exception | None = None
 
     for text in docs:
-
         try:
             rag_store.add_document(text)
             successes += 1
@@ -136,31 +168,58 @@ def ingest_documents(request: IngestRequest) -> IngestResponse:
     return IngestResponse(ingested=successes)
 
 
+@router.get("/status", response_model=StatusResponse)
+def status() -> StatusResponse:
+    docs_dir = os.getenv("DOCS_DIR", "/data/docs")
+    file_paths = rag_store.list_json_files(docs_dir)
+    file_names = [os.path.basename(p) for p in file_paths][:50]
+
+    return StatusResponse(
+        docs_dir=docs_dir,
+        json_files=len(file_paths),
+        chunks_in_store=rag_store.get_collection_count(),
+        files=file_names,
+    )
+
+
+@router.post("/reindex", response_model=ReindexResponse)
+def reindex() -> ReindexResponse:
+    """Clear and rebuild the vector DB from JSON files in DOCS_DIR."""
+    docs_dir = os.getenv("DOCS_DIR", "/data/docs")
+    enabled = _truthy(os.getenv("RAG_REINDEX_ENABLED", "true"))
+    if not enabled:
+        raise HTTPException(
+            status_code=HTTPStatus.FORBIDDEN,
+            detail="Reindex is disabled by configuration.",
+        )
+
+    try:
+        stats = rag_store.rebuild_from_json_dir(docs_dir)
+        return ReindexResponse(**stats)
+    except Exception as exc:
+        logger.exception("Reindex failed", exc_info=exc)
+        raise HTTPException(
+            status_code=HTTPStatus.BAD_GATEWAY,
+            detail=str(exc),
+        ) from exc
+
+
 @router.post("/query", response_model=QueryResponse)
 def query_rag(request: QueryRequest) -> QueryResponse:
-    """
-    Run a full RAG cycle:
-
-      1. Embed the question
-      2. Retrieve top_k similar chunks from Chroma
-      3. Call Ollama chat with those chunks as context
-      4. Return the model answer plus the raw context texts (for frontend display)
-    """
-    # --- Retrieve from vector store ---------------------------------
+    """Run a full RAG cycle: retrieve similar chunks and ask the chat model."""
     try:
         chunks: list[RAGChunk] = rag_store.query_similar_chunks(
             request.question,
             top_k=request.top_k,
         )
     except Exception as exc:
-        logger.exception("Vector store query failed", exc_info=exc)
+        logger.exception("Vector search failed", exc_info=exc)
         raise HTTPException(
             status_code=HTTPStatus.BAD_GATEWAY,
-            detail=str(exc),
+            detail=f"Vector search failed: {exc}",
         ) from exc
 
     if not chunks:
-        # test_rag_query_no_context_returns_404
         raise HTTPException(
             status_code=HTTPStatus.NOT_FOUND,
             detail="No relevant context found for the given question.",
@@ -169,7 +228,6 @@ def query_rag(request: QueryRequest) -> QueryResponse:
     context_texts = [c.text for c in chunks]
     context_block = "\n\n".join(context_texts)
 
-    # --- Call Ollama chat ------------------------------------------
     try:
         answer = _call_ollama_chat(
             question=request.question,
@@ -177,14 +235,21 @@ def query_rag(request: QueryRequest) -> QueryResponse:
         )
     except Exception as exc:
         logger.exception("Ollama chat failed", exc_info=exc)
-        # test_rag_query_ollama_failure_returns_502
         raise HTTPException(
             status_code=HTTPStatus.BAD_GATEWAY,
             detail=str(exc),
         ) from exc
 
-    # test_rag_query_success expectations:
-    #   - status_code == 200
-    #   - data["answer"].startswith("ANSWER to:")
-    #   - data["context"] == ["Miura Peninsula is located in Kanagawa Prefecture."]
-    return QueryResponse(answer=answer, context=context_texts)
+    chunk_out: list[ChunkOut] = []
+    for c in chunks:
+        meta = c.metadata if isinstance(c.metadata, dict) else {}
+        chunk_out.append(
+            ChunkOut(
+                id=_chunk_id_from_metadata(meta),
+                text=c.text,
+                distance=c.distance,
+                metadata=meta,
+            )
+        )
+
+    return QueryResponse(answer=answer, context=context_texts, chunks=chunk_out)

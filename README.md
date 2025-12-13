@@ -1,4 +1,4 @@
-# [RAG Container Template](https://github.com/europanite/rag_container_template "RAG Container Template")
+# [RAG Chat Container Template](https://github.com/europanite/rag_chat_container_template "RAG Chat Container Template")
 
 [![CI](https://github.com/europanite/rag_container_template/actions/workflows/ci.yml/badge.svg)](https://github.com/europanite/rag_container_template/actions/workflows/ci.yml)
 [![Python Lint](https://github.com/europanite/rag_container_template/actions/workflows/lint.yml/badge.svg)](https://github.com/europanite/rag_container_template/actions/workflows/lint.yml)
@@ -7,8 +7,53 @@
 
 !["UI"](./assets/images/frontend.png)
 
-This repository is a full-stack sandbox for building a **local Retrieval-Augmented Generation (RAG)** system.  
-The backend is a FastAPI service with authentication and a RAG API, using **ChromaDB** as a persistent vector store and **Ollama** for both embeddings and chat. The frontend is an Expo / React Native app that talks to the backend.
+A Docker Compose template for a simple **RAG (Retrieval-Augmented Generation)** app:
+
+- **Backend**: FastAPI
+- **Frontend**: Expo / React Native
+- **DB**: PostgreSQL (auth/users)
+- **Vector store**: ChromaDB
+- **LLM / Embeddings**: Ollama
+
+---
+
+## What changed in this version
+
+✅ **No document input form.**  
+Instead, the backend builds the vector DB from **JSON files stored in a directory** (mounted into the backend container).
+
+You can:
+
+- Auto-index at container startup (`RAG_AUTO_INDEX=true`)
+- Manually rebuild the index from the UI (calls `POST /rag/reindex`)
+- Check indexing status (calls `GET /rag/status`)
+
+---
+
+## JSON document format
+
+Place JSON files under:
+
+- Host: `./data/docs/*.json`
+- Container: `${DOCS_DIR}` (default: `/data/docs`)
+
+Each JSON file can be a single object or a list of objects:
+
+```json
+[
+  {
+    "id": "miura_intro_001",
+    "text": "三浦半島は神奈川県にあります。海がきれいです。山もあります。",
+    "source": "local-notes",
+    "metadata": { "lang": "ja", "tags": ["miura"] }
+  }
+]
+```
+
+Notes:
+
+- `id` must be unique across all documents.
+- Chunks are stored with deterministic IDs: `"{id}:{chunk_index}"`.
 
 ---
 
@@ -36,31 +81,6 @@ The backend is a FastAPI service with authentication and a RAG API, using **Chro
 
 ## Architecture
 
-```text
-+-----------------------------+
-|        Frontend (Expo)      |
-|  - React Native app         |
-|  - Calls backend /auth,     |
-|    /items, /rag endpoints   |
-+--------------+--------------+
-               |
-               v
-+-----------------------------+
-|       Backend (FastAPI)     |
-|  - Auth & Items routers     |
-|  - RAG router (/rag/...)    |
-|  - SQLAlchemy + Postgres    |
-+--------------+--------------+
-               |
-       +-------+----------+
-       |                  |
-       v                  v
-+-------------+   +------------------+
-|  ChromaDB   |   |   Ollama (LLM)   |
-|  Vector DB  |   |  /api/chat       |
-|  /chroma_db |   |  /api/embeddings |
-+-------------+   +------------------+
-```
 
 ---
 
@@ -72,16 +92,26 @@ The backend is a FastAPI service with authentication and a RAG API, using **Chro
 
 ### 2. Build and start all services:
 
+Edit `.env` if you want to change models or indexing behavior.
+
+### 3) Build and start
+
 ```bash
 # set environment variables:
-export REACT_NATIVE_PACKAGER_HOSTNAME=${YOUR_HOST}
+export REACT_NATIVE_PACKAGER_HOSTNAME=192.168.3.6
 
-# Build the image
 docker compose build
 
 # Run the container
 docker compose up
 ```
+---
+
+### 4) Open the app
+
+- Frontend: Expo dev server logs will show the QR code / URL.
+- Backend API: `http://localhost:8000/health`
+
 ---
 
 ### 3. Test:
@@ -175,6 +205,12 @@ curl -X POST http://localhost:8000/rag/query \
   ]
 }
 ```
+
+## Useful endpoints
+
+- `GET /rag/status` – docs dir + JSON file count + chunks in store
+- `POST /rag/reindex` – clear and rebuild Chroma from `DOCS_DIR`
+- `POST /rag/query` – ask a question (returns answer + retrieved context)
 
 ---
 

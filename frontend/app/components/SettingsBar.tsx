@@ -30,7 +30,7 @@ export default function SettingsBar() {
     </TouchableOpacity>
   );
 
-  const REPO_URL = "https://github.com/europanite/rag_container_template";
+  const REPO_URL = "https://github.com/europanite/rag_chat_container_template";
 
   return (
     <SafeAreaView edges={["top"]} style={{ backgroundColor: BAR_BG }}>
@@ -51,15 +51,14 @@ export default function SettingsBar() {
                 <Text
                   style={{
                     color: "#e5e7eb",
-                    fontSize: 32,
+                    fontSize: 20,
                     textDecorationLine: "underline",
                   }}
                   onPress={() => Linking.openURL(REPO_URL)}
                 >
-                  RAG Container Template
+                  RAG Chat Container Template
                 </Text>
               </View>
-
               <View style={{ flexDirection: "row", gap: 8, flexWrap: "wrap" }}>
                 <Text style={{ fontWeight: "700", color: "#ffffffff" }}>
                   {user ? `${user.email}` : "Not signed in"}

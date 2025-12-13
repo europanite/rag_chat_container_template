@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import {
   View,
   Text,
@@ -12,23 +12,36 @@ import {
 const API_BASE = process.env.EXPO_PUBLIC_API_BASE!;
 
 type RagChunk = {
-  id: string;
+  id?: string | null;
   text: string;
-  source?: string;
-  chunk_index?: number;
-  distance?: number;
+  distance?: number | null;
+  metadata?: Record<string, any>;
 };
 
 type RagQueryResponse = {
   answer: string;
-  chunks: RagChunk[];
+  context: string[];
+  chunks?: RagChunk[];
+};
+
+type RagStatusResponse = {
+  docs_dir: string;
+  json_files: number;
+  chunks_in_store: number;
+  files: string[];
+};
+
+type RagReindexResponse = {
+  documents: number;
+  chunks: number;
+  files: number;
 };
 
 export default function HomeScreen() {
-  const [docText, setDocText] = useState("");
-  const [docSource, setDocSource] = useState("manual");
-  const [ingestStatus, setIngestStatus] = useState<string | null>(null);
-  const [ingestLoading, setIngestLoading] = useState(false);
+  const [status, setStatus] = useState<RagStatusResponse | null>(null);
+  const [statusLoading, setStatusLoading] = useState(false);
+  const [reindexLoading, setReindexLoading] = useState(false);
+  const [reindexResult, setReindexResult] = useState<RagReindexResponse | null>(null);
 
   const [question, setQuestion] = useState("");
   const [answer, setAnswer] = useState("");
@@ -36,39 +49,53 @@ export default function HomeScreen() {
   const [queryLoading, setQueryLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const handleIngest = async () => {
-    if (!docText.trim()) {
-      setIngestStatus("Please enter some text to ingest.");
-      return;
+  const fetchStatus = async () => {
+    setStatusLoading(true);
+    try {
+      const res = await fetch(`${API_BASE}/rag/status`);
+      if (!res.ok) {
+        const body = await res.text();
+        throw new Error(`Status failed: ${res.status} ${body}`);
+      }
+      const data: RagStatusResponse = await res.json();
+      setStatus(data);
+    } catch (e: any) {
+      console.error(e);
+      setError(e.message ?? String(e));
+    } finally {
+      setStatusLoading(false);
     }
-    setIngestLoading(true);
-    setIngestStatus(null);
+  };
+
+  useEffect(() => {
+    void fetchStatus();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const handleReindex = async () => {
+    setReindexLoading(true);
     setError(null);
+    setReindexResult(null);
 
     try {
-      const res = await fetch(`${API_BASE}/rag/ingest`, {
+      const res = await fetch(`${API_BASE}/rag/reindex`, {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          documents: [docText],
-        }),
+        headers: { "Content-Type": "application/json" },
       });
 
       if (!res.ok) {
         const body = await res.text();
-        throw new Error(`Ingest failed: ${res.status} ${body}`);
+        throw new Error(`Reindex failed: ${res.status} ${body}`);
       }
 
-      const data = await res.json(); // { ingested: number }
-      setIngestStatus(`Ingested documents: ${data.ingested}`);
+      const data: RagReindexResponse = await res.json();
+      setReindexResult(data);
+      await fetchStatus();
     } catch (e: any) {
       console.error(e);
       setError(e.message ?? String(e));
-      setIngestStatus("Ingest failed.");
     } finally {
-      setIngestLoading(false);
+      setReindexLoading(false);
     }
   };
 
@@ -102,7 +129,13 @@ export default function HomeScreen() {
 
       const data: RagQueryResponse = await res.json();
       setAnswer(data.answer);
-      setChunks(data.chunks ?? []);
+
+      // Prefer structured chunks if provided; fallback to `context` strings.
+      if (Array.isArray(data.chunks) && data.chunks.length > 0) {
+        setChunks(data.chunks);
+      } else {
+        setChunks((data.context ?? []).map((t) => ({ text: t })));
+      }
     } catch (e: any) {
       console.error(e);
       setError(e.message ?? String(e));
@@ -110,6 +143,16 @@ export default function HomeScreen() {
       setQueryLoading(false);
     }
   };
+
+  const handleClear = () => {
+    setQuestion("");
+    setAnswer("");
+    setChunks([]);
+    setError(null);
+    setReindexResult(null);
+  };
+
+  const canClear = Boolean(question || answer || chunks.length > 0 || error || reindexResult);
 
   return (
     <KeyboardAvoidingView
@@ -125,100 +168,91 @@ export default function HomeScreen() {
         keyboardShouldPersistTaps="handled"
       >
         <View style={{ width: "100%", maxWidth: 720, gap: 24 }}>
-          {/* Section 1: Ingest */}
+          {/* Section 1: Index / Status */}
           <View
             style={{
-              backgroundColor: "#ffffff",
+              backgroundColor: "#fff",
               padding: 16,
-              borderRadius: 8,
-              shadowColor: "#000",
-              shadowOpacity: 0.05,
-              shadowRadius: 4,
-              elevation: 2,
+              borderRadius: 10,
+              borderWidth: 1,
+              borderColor: "#e0e0e0",
             }}
           >
             <Text style={{ fontSize: 18, fontWeight: "700", marginBottom: 8 }}>
-              1. Ingest document
-            </Text>
-            <Text style={{ marginBottom: 8, color: "#555" }}>
-              Paste text here and store it in the RAG store.
+              RAG Index (JSON directory)
             </Text>
 
-            <Text style={{ fontWeight: "600", marginBottom: 4 }}>Source</Text>
-            <TextInput
-              value={docSource}
-              onChangeText={setDocSource}
-              placeholder="e.g. official_website, blog, note"
-              style={{
-                borderWidth: 1,
-                borderColor: "#ccc",
-                borderRadius: 6,
-                paddingHorizontal: 8,
-                paddingVertical: 6,
-                marginBottom: 10,
-                backgroundColor: "#fff",
-              }}
-            />
-
-            <Text style={{ fontWeight: "600", marginBottom: 4 }}>
-              Document text
+            <Text style={{ color: "#555", marginBottom: 10 }}>
+              Documents are loaded from JSON files (mounted from{" "}
+              <Text style={{ fontWeight: "700" }}>./data/docs</Text>).
             </Text>
-            <TextInput
-              value={docText}
-              onChangeText={setDocText}
-              multiline
-              numberOfLines={6}
-              placeholder="Paste text here..."
-              style={{
-                borderWidth: 1,
-                borderColor: "#ccc",
-                borderRadius: 6,
-                paddingHorizontal: 8,
-                paddingVertical: 8,
-                minHeight: 120,
-                textAlignVertical: "top",
-                backgroundColor: "#fff",
-              }}
-            />
 
-            <View style={{ marginTop: 12 }}>
+            <View style={{ marginBottom: 12 }}>
               <Button
-                title={ingestLoading ? "Ingesting..." : "Ingest into RAG"}
-                onPress={handleIngest}
-                disabled={ingestLoading}
+                title={statusLoading ? "Refreshing..." : "Refresh status"}
+                onPress={fetchStatus}
+                disabled={statusLoading}
               />
             </View>
 
-            {ingestStatus && (
-              <Text style={{ marginTop: 8, color: "#333" }}>
-                {ingestStatus}
-              </Text>
+            <View style={{ marginBottom: 12 }}>
+              <Button
+                title={reindexLoading ? "Reindexing..." : "Reindex from JSON files"}
+                onPress={handleReindex}
+                disabled={reindexLoading}
+              />
+            </View>
+
+            {status && (
+              <View style={{ gap: 6 }}>
+                <Text>
+                  <Text style={{ fontWeight: "700" }}>DOCS_DIR:</Text> {status.docs_dir}
+                </Text>
+                <Text>
+                  <Text style={{ fontWeight: "700" }}>JSON files:</Text> {status.json_files}
+                </Text>
+                <Text>
+                  <Text style={{ fontWeight: "700" }}>Chunks in store:</Text> {status.chunks_in_store}
+                </Text>
+
+                {status.files?.length > 0 && (
+                  <View style={{ marginTop: 6 }}>
+                    <Text style={{ fontWeight: "700", marginBottom: 4 }}>Files</Text>
+                    {status.files.map((f) => (
+                      <Text key={f} style={{ color: "#555" }}>
+                        • {f}
+                      </Text>
+                    ))}
+                  </View>
+                )}
+              </View>
+            )}
+
+            {reindexResult && (
+              <View style={{ marginTop: 10 }}>
+                <Text style={{ fontWeight: "700" }}>Reindex result</Text>
+                <Text style={{ color: "#555" }}>
+                  files={reindexResult.files}, documents={reindexResult.documents}, chunks={reindexResult.chunks}
+                </Text>
+              </View>
             )}
           </View>
 
-          {/* Section 2: Query */}
+          {/* Section 2: Ask */}
           <View
             style={{
-              backgroundColor: "#ffffff",
+              backgroundColor: "#fff",
               padding: 16,
-              borderRadius: 8,
-              shadowColor: "#000",
-              shadowOpacity: 0.05,
-              shadowRadius: 4,
-              elevation: 2,
+              borderRadius: 10,
+              borderWidth: 1,
+              borderColor: "#e0e0e0",
             }}
           >
             <Text style={{ fontSize: 18, fontWeight: "700", marginBottom: 8 }}>
-              2. Ask a question
-            </Text>
-            <Text style={{ marginBottom: 8, color: "#555" }}>
-              Ask and the backend will search your stored chunks with
-              Ollama embeddings and answer using the local model.
+              Ask a question
             </Text>
 
-            <Text style={{ fontWeight: "600", marginBottom: 4 }}>
-              Question
-            </Text>
+            <Text style={{ fontWeight: "600", marginBottom: 4 }}>Question</Text>
             <TextInput
               value={question}
               onChangeText={setQuestion}
@@ -234,57 +268,86 @@ export default function HomeScreen() {
               }}
             />
 
-            <View style={{ marginTop: 4 }}>
+            <View style={{ gap: 8 }}>
               <Button
-                title={queryLoading ? "Asking..." : "Ask RAG"}
+                title={queryLoading ? "Thinking..." : "Ask"}
                 onPress={handleQuery}
                 disabled={queryLoading}
               />
+              <Button title="Clear" onPress={handleClear} disabled={!canClear} />
             </View>
 
             {error && (
-              <Text style={{ marginTop: 8, color: "red" }}>{error}</Text>
+              <Text style={{ marginTop: 10, color: "crimson" }}>Error: {error}</Text>
             )}
+          </View>
+
+          {/* Section 3: Answer */}
+          <View
+            style={{
+              backgroundColor: "#fff",
+              padding: 16,
+              borderRadius: 10,
+              borderWidth: 1,
+              borderColor: "#e0e0e0",
+            }}
+          >
+            <Text style={{ fontSize: 18, fontWeight: "700", marginBottom: 8 }}>
+              Answer
+            </Text>
 
             {answer ? (
-              <View style={{ marginTop: 12 }}>
-                <Text style={{ fontWeight: "700", marginBottom: 4 }}>
-                  Answer
-                </Text>
-                <Text style={{ color: "#222" }}>{answer}</Text>
-              </View>
-            ) : null}
+              <Text style={{ lineHeight: 20 }}>{answer}</Text>
+            ) : (
+              <Text style={{ color: "#777" }}>
+                The answer will appear here after you ask a question.
+              </Text>
+            )}
 
             {chunks.length > 0 && (
-              <View style={{ marginTop: 16 }}>
-                <Text style={{ fontWeight: "700", marginBottom: 4 }}>
-                  Retrieved context ({chunks.length})
+              <View style={{ marginTop: 14 }}>
+                <Text style={{ fontWeight: "700", marginBottom: 6 }}>
+                  Retrieved context
                 </Text>
-                {chunks.map((c, idx) => (
-                  <View
-                    key={c.id + "-" + c.chunk_index + "-" + idx}
-                    style={{
-                      marginBottom: 8,
-                      padding: 8,
-                      borderRadius: 6,
-                      backgroundColor: "#f0f0f0",
-                    }}
-                  >
-                    <Text
+
+                {chunks.map((c, i) => {
+                  const meta = c.metadata ?? {};
+                  const source = meta.source ? String(meta.source) : "";
+                  const file = meta.file ? String(meta.file) : "";
+                  const docId = meta.doc_id ? String(meta.doc_id) : "";
+                  const labelParts = [
+                    c.id ? `id=${c.id}` : null,
+                    docId ? `doc_id=${docId}` : null,
+                    file ? `file=${file}` : null,
+                    source ? `source=${source}` : null,
+                  ].filter(Boolean);
+
+                  return (
+                    <View
+                      key={`${c.id ?? i}`}
                       style={{
-                        fontSize: 12,
-                        color: "#666",
-                        marginBottom: 4,
+                        borderWidth: 1,
+                        borderColor: "#eee",
+                        borderRadius: 8,
+                        padding: 10,
+                        marginBottom: 10,
+                        backgroundColor: "#fafafa",
                       }}
                     >
-                      {c.source ?? "unknown"} · chunk {c.chunk_index ?? "?"}
-                      {typeof c.distance === "number"
-                        ? ` · dist: ${c.distance.toFixed(3)}`
-                        : ""}
-                    </Text>
-                    <Text style={{ color: "#222" }}>{c.text}</Text>
-                  </View>
-                ))}
+                      {labelParts.length > 0 && (
+                        <Text style={{ color: "#666", marginBottom: 6 }}>
+                          {labelParts.join(" • ")}
+                        </Text>
+                      )}
+                      <Text style={{ lineHeight: 18 }}>{c.text}</Text>
+                      {typeof c.distance === "number" && (
+                        <Text style={{ color: "#888", marginTop: 6 }}>
+                          distance={c.distance.toFixed(4)}
+                        </Text>
+                      )}
+                    </View>
+                  );
+                })}
               </View>
             )}
           </View>

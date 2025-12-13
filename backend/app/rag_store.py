@@ -1,7 +1,10 @@
+import json
 import logging
 import os
 import re
 import uuid
+from pathlib import Path
+from typing import Any
 
 import chromadb
 import requests
@@ -11,7 +14,41 @@ logger = logging.getLogger(__name__)
 # -------------------------------------------------------------------
 # Simple data containers
 # -------------------------------------------------------------------
+def _slug(s: str) -> str:
+    s = re.sub(r"[^0-9A-Za-z_]+", "_", s).strip("_").lower()
+    return s or "tag"
 
+def _chroma_safe_metadata(meta: dict[str, Any]) -> dict[str, Any]:
+    """
+    Chroma metadata: list/dict
+    - list[str] -> "a,b,c"
+    - dict/list -> JSON
+    """
+    out: dict[str, Any] = {}
+    for k, v in (meta or {}).items():
+        key = str(k)
+
+        if v is None or isinstance(v, (str, int, float, bool)):
+            out[key] = v
+            continue
+
+        if isinstance(v, list):
+            if all(isinstance(x, str) for x in v):
+                out[key] = ",".join(v)
+                if key == "tags":
+                    for t in v:
+                        out[f"tag__{_slug(t)}"] = True
+            else:
+                out[key] = json.dumps(v, ensure_ascii=False)
+            continue
+
+        if isinstance(v, dict):
+            out[key] = json.dumps(v, ensure_ascii=False)
+            continue
+
+        out[key] = str(v)
+
+    return out
 
 class DocumentChunk:
     """Internal representation of a chunked piece of text."""
@@ -43,6 +80,9 @@ _OLLAMA_BASE_URL_ENV = "OLLAMA_BASE_URL"
 _OLLAMA_EMBED_MODEL_ENV = "EMBEDDING_MODEL"
 _DEFAULT_OLLAMA_BASE_URL = "http://ollama:11434"
 _DEFAULT_EMBED_MODEL = "nomic-embed-text"
+
+_RAG_CHUNK_SIZE_ENV = "RAG_CHUNK_SIZE"
+
 
 _client = None
 _collection = None
@@ -135,48 +175,73 @@ def _get_collection():
 
 _DEFAULT_CHUNK_SIZE=256
 
+
+def _get_chunk_size() -> int:
+    """
+    Read chunk size from env (RAG_CHUNK_SIZE). Falls back to _DEFAULT_CHUNK_SIZE.
+    """
+    raw = os.getenv(_RAG_CHUNK_SIZE_ENV, "").strip()
+    if not raw:
+        return _DEFAULT_CHUNK_SIZE
+    try:
+        v = int(raw)
+        return v if v > 0 else _DEFAULT_CHUNK_SIZE
+    except ValueError:
+        logger.warning(
+            "Invalid %s=%r; falling back to default=%d",
+            _RAG_CHUNK_SIZE_ENV,
+            raw,
+            _DEFAULT_CHUNK_SIZE,
+        )
+        return _DEFAULT_CHUNK_SIZE
+
 JP_SENT_SPLIT = re.compile(r"(?<=[。！？])")  # noqa: RUF001
 CJK_RE = re.compile(r"[\u3040-\u30ff\u4e00-\u9fff]")
 
 def chunk_text(text: str, max_tokens: int = _DEFAULT_CHUNK_SIZE) -> list[DocumentChunk]:
+    """Split text into chunks with basic sentence-aware behavior.
+
+    - For CJK text (Japanese/Chinese/Korean), split on Japanese punctuation and
+      *do not* pack multiple sentences into a single chunk by default. This keeps
+      retrieval snippets semantically tight.
+    - For non-CJK text, split by whitespace into ~`max_tokens` words.
+
+    Notes:
+    - This is a simple heuristic chunker. If you need more accurate token counts,
+      integrate a tokenizer (e.g., tiktoken) and chunk by tokens instead of chars.
+    """
     if not text:
         return []
 
     has_cjk = CJK_RE.search(text) is not None
-
     chunks: list[DocumentChunk] = []
 
     if has_cjk:
-        sentences = [s for s in JP_SENT_SPLIT.split(text) if s.strip()]
-        current: list[str] = []
-        length = 0
-
+        # JP_SENT_SPLIT uses look-behind so punctuation stays with the sentence.
+        sentences = [s.strip() for s in JP_SENT_SPLIT.split(text) if s.strip()]
         for s in sentences:
-            s_len = len(s)
-            if length + s_len > max_tokens and current:
+            if len(s) <= max_tokens:
                 chunk_index = len(chunks)
-                chunk_text_value = "".join(current)
                 chunks.append(
                     DocumentChunk(
-                        chunk_text_value,
+                        s,
                         {"chunk_index": chunk_index, "index": chunk_index},
                     )
                 )
-                current = []
-                length = 0
+                continue
 
-            current.append(s)
-            length += s_len
-
-        if current:
-            chunk_index = len(chunks)
-            chunk_text_value = "".join(current)
-            chunks.append(
-                DocumentChunk(
-                    chunk_text_value,
-                    {"chunk_index": chunk_index, "index": chunk_index},
+            # Very long "sentence" (or no punctuation) -> split by characters.
+            for i in range(0, len(s), max_tokens):
+                part = s[i : i + max_tokens].strip()
+                if not part:
+                    continue
+                chunk_index = len(chunks)
+                chunks.append(
+                    DocumentChunk(
+                        part,
+                        {"chunk_index": chunk_index, "index": chunk_index},
+                    )
                 )
-            )
 
     else:
         words = text.split()
@@ -211,76 +276,95 @@ def chunk_text(text: str, max_tokens: int = _DEFAULT_CHUNK_SIZE) -> list[Documen
 
     total = len(chunks)
     for c in chunks:
-        c.metadata.setdefault("total_chunks", total)
+        c.metadata["total_chunks"] = total
 
     return chunks
-
 
 # -------------------------------------------------------------------
 # Embeddings (Ollama)
 # -------------------------------------------------------------------
 
-def _embed_with_ollama(text):
-    """
-    Call Ollama's /api/embed endpoint for a single text.
-
-    It supports multiple possible response formats:
-
-    New (Ollama /api/embed):
-
-        {
-          "model": "...",
-          "embeddings": [[...], ...]
-        }
-
-    Older custom / other providers:
-
-        {
-          "embedding": [...]
-        }
-
-    Or:
-
-        {
-          "data": [{ "embedding": [...], ... }]
-        }
-    """
+def _embed_with_ollama(text: str) -> list[float]:
     base_url = _get_ollama_base_url().rstrip("/")
     model = _get_embedding_model()
 
-    payload = {
-        "model": model,
-        "input": text,
-    }
+    attempts = [
+        ("/api/embed", {"model": model, "input": text}),       # newer
+        ("/api/embeddings", {"model": model, "prompt": text}), # older
+    ]
 
-    url = base_url + "/api/embed"
-    logger.debug("Requesting embedding from %s with model=%s", url, model)
+    last_error: Exception | None = None
 
-    response = requests.post(url, json=payload, timeout=30)
-    response.raise_for_status()
-    data = response.json()
+    for endpoint, payload in attempts:
+        url = base_url + endpoint
+        try:
+            response = requests.post(url, json=payload, timeout=30)
 
-    embedding = None
+            try:
+                response.raise_for_status()
+            except requests.HTTPError as http_err:
+                status = getattr(response, "status_code", None)
 
-    if isinstance(data, dict) and "embeddings" in data:
-        embs = data["embeddings"]
-        if isinstance(embs, list) and embs:
-            embedding = embs[0]
+                body_text = ""
+                try:
+                    body_text = response.text or ""
+                except Exception:
+                    body_text = ""
 
-    elif isinstance(data, dict) and "embedding" in data:
-        embedding = data["embedding"]
+                # Ollama: 404 can mean "model does not exist"
+                if status == 404:
+                    err_msg = ""
+                    try:
+                        data = response.json()
+                        if isinstance(data, dict) and isinstance(data.get("error"), str):
+                            err_msg = data["error"]
+                    except Exception:
+                        err_msg = body_text
 
-    elif isinstance(data, dict) and "data" in data:
-        first = data["data"][0]
-        embedding = first["embedding"]
+                    lower = (err_msg or "").lower()
+                    if "model" in lower and ("not found" in lower or "does not exist" in lower):
+                        raise RuntimeError(
+                            f"Ollama model is not available: {model!r}. "
+                            f"Pull it first: `docker compose exec ollama ollama pull {model}`"
+                        ) from http_err
 
-    if embedding is None:
-        raise ValueError(f"Unexpected embedding response format: keys={list(data.keys())}")
+                    # If it really looks like a missing route, try next endpoint
+                    if "404 page not found" in (body_text or "").lower():
+                        last_error = http_err
+                        continue
 
-    if not isinstance(embedding, list):
-        raise ValueError("Embedding must be a list of floats")
+                raise  # other HTTP errors
 
-    return embedding
+            data = response.json()
+
+            # parse embedding (existing logic)
+            embedding = None
+            if isinstance(data, dict) and "embeddings" in data:
+                embeddings = data.get("embeddings")
+                if isinstance(embeddings, list) and embeddings and isinstance(embeddings[0], list):
+                    embedding = embeddings[0]
+            if embedding is None and isinstance(data, dict) and "embedding" in data:
+                raw = data.get("embedding")
+                if isinstance(raw, list):
+                    embedding = raw
+            if embedding is None and isinstance(data, dict) and "data" in data:
+                rows = data.get("data")
+                if isinstance(rows, list) and rows and isinstance(rows[0], dict):
+                    raw = rows[0].get("embedding")
+                    if isinstance(raw, list):
+                        embedding = raw
+
+            if not isinstance(embedding, list) or not embedding:
+                raise ValueError(f"Unexpected embedding response format at {endpoint}")
+
+            return embedding
+
+        except Exception as exc:
+            last_error = exc
+
+    raise RuntimeError(f"Ollama embedding failed: {last_error}") from last_error
+
+
 
 def embed_texts(texts: list[str]) -> list[list[float]]:
     if not texts:
@@ -324,7 +408,7 @@ def embed_texts(texts: list[str]) -> list[list[float]]:
 
 def add_document(text: str) -> None:
     """Split text into chunks, embed them, and store in Chroma."""
-    chunks = chunk_text(text, max_tokens=200)
+    chunks = chunk_text(text, max_tokens=_get_chunk_size())
     if not chunks:
         logger.warning("No chunks produced from text; nothing to add.")
         return
@@ -424,3 +508,261 @@ def query_similar_chunks(question, top_k=3):
         )
 
     return chunks
+
+# -------------------------------------------------------------------
+# JSON directory ingestion (no UI / no input form)
+# -------------------------------------------------------------------
+
+
+def list_json_files(docs_dir: str) -> list[str]:
+    """Return a sorted list of *.json files under `docs_dir` (non-recursive)."""
+    try:
+        root = Path(docs_dir)
+    except Exception:
+        return []
+
+    if not root.exists() or not root.is_dir():
+        return []
+
+    return sorted([str(p) for p in root.glob("*.json")])
+
+def _escape_control_chars_inside_json_strings(raw: str) -> str:
+    """
+    Make 'almost JSON' parseable by escaping control characters (< 0x20)
+    that appear *inside* JSON double-quoted strings.
+
+    This fixes hand-edited JSON like:
+      "text": "hello
+      world"
+    which is invalid JSON (literal newline in a string).
+    """
+    out: list[str] = []
+    in_string = False
+    escaped = False
+
+    for ch in raw:
+        if not in_string:
+            out.append(ch)
+            if ch == '"':
+                in_string = True
+                escaped = False
+            continue
+
+        # inside a JSON string
+        if escaped:
+            out.append(ch)
+            escaped = False
+            continue
+
+        if ch == "\\":
+            out.append(ch)
+            escaped = True
+            continue
+
+        if ch == '"':
+            out.append(ch)
+            in_string = False
+            continue
+
+        code = ord(ch)
+        if code < 0x20:
+            if ch == "\n":
+                out.append("\\n")
+            elif ch == "\r":
+                out.append("\\r")
+            elif ch == "\t":
+                out.append("\\t")
+            else:
+                out.append(f"\\u{code:04x}")
+        else:
+            out.append(ch)
+
+    return "".join(out)
+
+
+def _load_json_file(path: str) -> list[dict]:
+    p = Path(path)
+
+    raw = p.read_text(encoding="utf-8")
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        fixed = _escape_control_chars_inside_json_strings(raw)
+        logger.warning("Invalid JSON fixed by escaping control characters: %s", path)
+        data = json.loads(fixed)
+
+    if isinstance(data, dict):
+        data = [data]
+
+    if not isinstance(data, list):
+        raise ValueError(f"JSON must be an object or list of objects: {path}")
+
+    docs: list[dict] = []
+    for item in data:
+        if not isinstance(item, dict):
+            continue
+        doc_id = item.get("id")
+        text = item.get("text")
+        if not isinstance(doc_id, str) or not doc_id.strip():
+            raise ValueError(f"Missing/invalid 'id' in {path}")
+        if not isinstance(text, str) or not text.strip():
+            raise ValueError(f"Missing/invalid 'text' for id={doc_id!r} in {path}")
+
+        docs.append(
+            {
+                "id": doc_id.strip(),
+                "text": text,
+                "source": item.get("source"),
+                "metadata": item.get("metadata") if isinstance(item.get("metadata"), dict) else {},
+                "file": str(p.name),
+            }
+        )
+
+    return docs
+
+
+
+def get_collection_count() -> int:
+    """Return number of stored records (chunks) in the Chroma collection."""
+    try:
+        return int(_get_collection().count())
+    except Exception:
+        return 0
+
+
+def _delete_by_doc_id(doc_id: str) -> None:
+    """Best-effort delete of all chunks for a given doc_id."""
+    col = _get_collection()
+    try:
+        # Chroma collections usually support `where` filtering.
+        col.delete(where={"doc_id": doc_id})
+    except Exception:
+        # Fallback: try deleting by ids if we can infer them later; otherwise ignore.
+        return
+
+
+def upsert_document(
+    doc_id: str,
+    text: str,
+    *,
+    source: str | None = None,
+    metadata: dict | None = None,
+    max_tokens: int | None = None,
+) -> int:
+    """Chunk + embed + store one document with deterministic chunk IDs.
+
+    IDs are generated as: "{doc_id}:{chunk_index}" so re-indexing updates the same
+    logical records.
+
+    Returns:
+        Number of chunks stored.
+    """
+    if not isinstance(doc_id, str) or not doc_id.strip():
+        raise ValueError("doc_id must be a non-empty string")
+    if not isinstance(text, str) or not text.strip():
+        raise ValueError("text must be a non-empty string")
+
+    size = int(max_tokens) if isinstance(max_tokens, int) and max_tokens > 0 else _get_chunk_size()
+    chunks = chunk_text(text, max_tokens=size)
+    if not chunks:
+        return 0
+
+    chunk_texts = [c.text for c in chunks]
+    embeddings = embed_texts(chunk_texts)
+
+    base_meta = _chroma_safe_metadata(dict(metadata or {}))
+    base_meta["doc_id"] = doc_id
+    if source:
+        base_meta.setdefault("source", source)
+
+    metadatas: list[dict] = []
+    ids: list[str] = []
+    for c in chunks:
+        m = dict(base_meta)
+        if isinstance(c.metadata, dict):
+            m.update(c.metadata)
+
+        m = _chroma_safe_metadata(m)
+
+        # Ensure deterministic chunk id.
+        idx = m.get("chunk_index")
+        if idx is None:
+            idx = m.get("index", 0)
+
+        metadatas.append(m)
+        ids.append(f"{doc_id}:{idx}")
+
+    col = _get_collection()
+
+    # Prefer upsert if available. Otherwise, delete existing doc chunks and add.
+    if hasattr(col, "upsert"):
+        col.upsert(
+            embeddings=embeddings,
+            documents=chunk_texts,
+            metadatas=metadatas,
+            ids=ids,
+        )
+    else:
+        _delete_by_doc_id(doc_id)
+        col.add(
+            embeddings=embeddings,
+            documents=chunk_texts,
+            metadatas=metadatas,
+            ids=ids,
+        )
+
+    return len(chunks)
+
+
+def ingest_json_dir(docs_dir: str) -> dict[str, int]:
+    """Ingest every document found in JSON files under `docs_dir`.
+
+    Expected JSON format (per entry):
+      {
+        "id": "unique_doc_id",
+        "text": "document text ...",
+        "source": "optional",
+        "metadata": {"optional": "dict"}
+      }
+
+    Returns:
+        {"documents": <count>, "chunks": <count>, "files": <count>}
+    """
+    json_files = list_json_files(docs_dir)
+    documents = 0
+    chunks = 0
+
+    for path in json_files:
+        entries = _load_json_file(path)
+        for e in entries:
+            documents += 1
+            meta = dict(e.get("metadata") or {})
+            # Preserve the file name for traceability.
+            meta.setdefault("file", e.get("file"))
+            chunks += upsert_document(
+                e["id"],
+                e["text"],
+                source=e.get("source"),
+                metadata=meta,
+            )
+
+    return {"documents": documents, "chunks": chunks, "files": len(json_files)}
+
+
+def reset_collection() -> None:
+    """Delete and recreate the Chroma collection (best-effort)."""
+    global _collection
+    name = _get_chroma_collection_name()
+    try:
+        _get_chroma_client().delete_collection(name)
+    except Exception:
+        pass
+    _collection = None
+    _get_collection()
+
+
+def rebuild_from_json_dir(docs_dir: str) -> dict[str, int]:
+    """Clear the collection and ingest JSON documents from `docs_dir`."""
+    reset_collection()
+    return ingest_json_dir(docs_dir)
+

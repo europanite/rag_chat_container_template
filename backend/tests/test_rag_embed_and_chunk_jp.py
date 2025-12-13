@@ -11,7 +11,7 @@ from rag_store import chunk_text
 def test_chunk_text_splits_japanese_sentences_and_sets_metadata() -> None:
     text = "三浦半島は神奈川県にあります。海がきれいです。山もあります。"
 
-    # ★ max_tokens を小さくして、文ごとに分割される状況を作る
+    # ★ max_tokens
     chunks = chunk_text(text, max_tokens=10)
 
     texts = [c.text.strip() for c in chunks]
