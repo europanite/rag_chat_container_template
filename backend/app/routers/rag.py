@@ -170,7 +170,7 @@ def ingest_rag(request: IngestRequest) -> IngestResponse:
 
 @router.get("/status", response_model=StatusResponse)
 def status() -> StatusResponse:
-    docs_dir = os.getenv("DOCS_DIR", "/data/docs")
+    docs_dir = os.getenv("RAG_DOCS_DIR") or os.getenv("DOCS_DIR", "/data/docs")
     file_paths = rag_store.list_json_files(docs_dir)
     file_names = [os.path.basename(p) for p in file_paths][:50]
 
@@ -185,7 +185,7 @@ def status() -> StatusResponse:
 @router.post("/reindex", response_model=ReindexResponse)
 def reindex() -> ReindexResponse:
     """Clear and rebuild the vector DB from JSON files in DOCS_DIR."""
-    docs_dir = os.getenv("DOCS_DIR", "/data/docs")
+    docs_dir = os.getenv("RAG_DOCS_DIR") or os.getenv("DOCS_DIR", "/data/docs")
     enabled = _truthy(os.getenv("RAG_REINDEX_ENABLED", "true"))
     if not enabled:
         raise HTTPException(

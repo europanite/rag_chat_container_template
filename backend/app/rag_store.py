@@ -388,8 +388,9 @@ def _embed_with_ollama(text: str) -> list[float]:
         except Exception as exc:
             last_error = exc
 
+    if last_error is None:
+        raise RuntimeError("Ollama embedding failed")
     raise RuntimeError(f"Ollama embedding failed: {last_error}") from last_error
-
 
 
 def embed_texts(texts: list[str]) -> list[list[float]]:
@@ -633,14 +634,15 @@ def _load_json_file(path: str) -> list[dict]:
             raise ValueError(f"Missing/invalid 'id' in {path}")
         if not isinstance(text, str) or not text.strip():
             raise ValueError(f"Missing/invalid 'text' for id={doc_id!r} in {path}")
-
+        default_source = p.resolve().as_uri()  # file:///...
+        meta = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
         docs.append(
             {
                 "id": doc_id.strip(),
                 "text": text,
-                "source": item.get("source"),
-                "metadata": item.get("metadata") if isinstance(item.get("metadata"), dict) else {},
+                "source": item.get("source") or default_source,
                 "file": str(p.name),
+                "metadata": meta,
             }
         )
 
