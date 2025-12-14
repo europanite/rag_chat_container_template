@@ -17,19 +17,6 @@ A Docker Compose template for a simple **RAG (Retrieval-Augmented Generation)** 
 
 ---
 
-## What changed in this version
-
-✅ **No document input form.**  
-Instead, the backend builds the vector DB from **JSON files stored in a directory** (mounted into the backend container).
-
-You can:
-
-- Auto-index at container startup (`RAG_AUTO_INDEX=true`)
-- Manually rebuild the index from the UI (calls `POST /rag/reindex`)
-- Check indexing status (calls `GET /rag/status`)
-
----
-
 ## JSON document format
 
 Place JSON files under:
@@ -98,7 +85,7 @@ Edit `.env` if you want to change models or indexing behavior.
 
 ```bash
 # set environment variables:
-export REACT_NATIVE_PACKAGER_HOSTNAME=192.168.3.6
+export REACT_NATIVE_PACKAGER_HOSTNAME=${YOUR_HOST}
 
 # Build the container
 docker compose build
@@ -106,6 +93,12 @@ docker compose build
 # Run the container
 docker compose up
 ```
+
+```bash
+# delete injection
+ sudo rm -rd chroma_db/*
+```
+
 ---
 
 ### 4) Open the app
