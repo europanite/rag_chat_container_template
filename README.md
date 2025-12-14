@@ -1,9 +1,9 @@
 # [RAG Chat Container Template](https://github.com/europanite/rag_chat_container_template "RAG Chat Container Template")
 
-[![CI](https://github.com/europanite/rag_container_template/actions/workflows/ci.yml/badge.svg)](https://github.com/europanite/rag_container_template/actions/workflows/ci.yml)
-[![Python Lint](https://github.com/europanite/rag_container_template/actions/workflows/lint.yml/badge.svg)](https://github.com/europanite/rag_container_template/actions/workflows/lint.yml)
-[![CodeQL Advanced](https://github.com/europanite/rag_container_template/actions/workflows/codeql.yml/badge.svg)](https://github.com/europanite/rag_container_template/actions/workflows/codeql.yml)
-[![pages-build-deployment](https://github.com/europanite/rag_container_template/actions/workflows/pages/pages-build-deployment/badge.svg)](https://github.com/europanite/rag_container_template/actions/workflows/pages/pages-build-deployment)
+[![CI](https://github.com/europanite/rag_chat_container_template/actions/workflows/ci.yml/badge.svg)](https://github.com/europanite/rag_chat_container_template/actions/workflows/ci.yml)
+[![Python Lint](https://github.com/europanite/rag_chat_container_template/actions/workflows/lint.yml/badge.svg)](https://github.com/europanite/rag_chat_container_template/actions/workflows/lint.yml)
+[![CodeQL Advanced](https://github.com/europanite/rag_chat_container_template/actions/workflows/codeql.yml/badge.svg)](https://github.com/europanite/rag_chat_container_template/actions/workflows/codeql.yml)
+[![pages-build-deployment](https://github.com/europanite/rag_chat_container_template/actions/workflows/pages/pages-build-deployment/badge.svg)](https://github.com/europanite/rag_chat_container_template/actions/workflows/pages/pages-build-deployment)
 
 !["UI"](./assets/images/frontend.png)
 
@@ -98,8 +98,9 @@ Edit `.env` if you want to change models or indexing behavior.
 
 ```bash
 # set environment variables:
-export REACT_NATIVE_PACKAGER_HOSTNAME=${YOUR_HOST}
+export REACT_NATIVE_PACKAGER_HOSTNAME=192.168.3.6
 
+# Build the container
 docker compose build
 
 # Run the container
