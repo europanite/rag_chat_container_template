@@ -11,8 +11,8 @@ from rag_store import chunk_text
 def test_chunk_text_splits_japanese_sentences_and_sets_metadata() -> None:
     text = "三浦半島は神奈川県にあります。海がきれいです。山もあります。"
 
-    # ★ max_tokens
-    chunks = chunk_text(text, max_tokens=10)
+    # ★ max_tokens 
+    chunks = chunk_text(text, max_tokens=50)
 
     texts = [c.text.strip() for c in chunks]
     assert texts == [
@@ -21,12 +21,39 @@ def test_chunk_text_splits_japanese_sentences_and_sets_metadata() -> None:
         "山もあります。",
     ]
 
-    num_chunks = 3
-
-    # meta data
     assert [c.metadata["chunk_index"] for c in chunks] == [0, 1, 2]
-    assert all(c.metadata["total_chunks"] == num_chunks for c in chunks)
+    assert all(c.metadata["total_chunks"] == 3 for c in chunks)
 
+def test_chunk_text_splits_long_japanese_sentence_by_char_limit() -> None:
+    # max_tokens 
+    text = "三浦半島は神奈川県にあります。海がきれいです。山もあります。"
+    chunks = chunk_text(text, max_tokens=10)
+
+    texts = [c.text.strip() for c in chunks]
+    assert texts == [
+        "三浦半島は神奈川県に",  
+        "あります。",
+        "海がきれいです。",
+        "山もあります。",
+    ]
+    assert [c.metadata["chunk_index"] for c in chunks] == [0, 1, 2, 3]
+    assert all(c.metadata["total_chunks"] == 4 for c in chunks)
+
+def test__embed_with_ollama_raises_runtime_error_on_unexpected_payload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_post(url: str, json: dict[str, Any], timeout: int) -> _DummyResponse:
+        return _DummyResponse({"unexpected": "shape"})
+
+    monkeypatch.setattr(rag_store.requests, "post", fake_post)
+
+    # ValueError
+    with pytest.raises(RuntimeError) as excinfo:
+        rag_store._embed_with_ollama("dummy text")
+
+    assert "Ollama embedding failed" in str(excinfo.value)
+    assert isinstance(excinfo.value.__cause__, ValueError)
+    assert "Unexpected embedding response format" in str(excinfo.value.__cause__)
 
 # 2) embed_texts:  ->
 def test_embed_texts_empty_list_returns_empty() -> None:
@@ -102,8 +129,15 @@ def test__embed_with_ollama_raises_value_error_on_unexpected_payload(
 
     monkeypatch.setattr(rag_store.requests, "post", fake_post)
 
-    with pytest.raises(ValueError) as excinfo:
+
+    with pytest.raises(RuntimeError) as excinfo:
         rag_store._embed_with_ollama("dummy text")
+
+    assert isinstance(excinfo.value.__cause__, ValueError)
+    assert "Unexpected embedding response format" in str(excinfo.value.__cause__)
 
     msg = str(excinfo.value)
     assert "Unexpected embedding response format" in msg
+
+def test_extract_embedding_from_response_returns_none_on_unexpected_payload() -> None:
+    assert rag_store._extract_embedding_from_response({"unexpected": "shape"}) is None
