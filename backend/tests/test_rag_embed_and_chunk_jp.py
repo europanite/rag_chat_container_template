@@ -11,7 +11,7 @@ from rag_store import chunk_text
 def test_chunk_text_splits_japanese_sentences_and_sets_metadata() -> None:
     text = "三浦半島は神奈川県にあります。海がきれいです。山もあります。"
 
-    # ★ max_tokens 
+    # ★ max_tokens
     chunks = chunk_text(text, max_tokens=50)
 
     texts = [c.text.strip() for c in chunks]
@@ -22,22 +22,24 @@ def test_chunk_text_splits_japanese_sentences_and_sets_metadata() -> None:
     ]
 
     assert [c.metadata["chunk_index"] for c in chunks] == [0, 1, 2]
-    assert all(c.metadata["total_chunks"] == 3 for c in chunks)
+    TOTAL_CHUNKS=3
+    assert all(c.metadata["total_chunks"] == TOTAL_CHUNKS for c in chunks)
 
 def test_chunk_text_splits_long_japanese_sentence_by_char_limit() -> None:
-    # max_tokens 
+    # max_tokens
     text = "三浦半島は神奈川県にあります。海がきれいです。山もあります。"
     chunks = chunk_text(text, max_tokens=10)
 
     texts = [c.text.strip() for c in chunks]
     assert texts == [
-        "三浦半島は神奈川県に",  
+        "三浦半島は神奈川県に",
         "あります。",
         "海がきれいです。",
         "山もあります。",
     ]
     assert [c.metadata["chunk_index"] for c in chunks] == [0, 1, 2, 3]
-    assert all(c.metadata["total_chunks"] == 4 for c in chunks)
+    TOTAL_CHUNKS=4
+    assert all(c.metadata["total_chunks"] == TOTAL_CHUNKS for c in chunks)
 
 def test__embed_with_ollama_raises_runtime_error_on_unexpected_payload(
     monkeypatch: pytest.MonkeyPatch,

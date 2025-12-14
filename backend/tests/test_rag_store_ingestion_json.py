@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+
 import pytest
 import rag_store
 
@@ -39,7 +40,9 @@ def test_load_json_file_repairs_and_normalizes(tmp_path: Path) -> None:
     assert d["source"].startswith("file://")
 
 
-def test_ingest_json_dir_counts_documents_chunks_files(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_ingest_json_dir_counts_documents_chunks_files(
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path) -> None:
     (tmp_path / "a.json").write_text(
         json.dumps([{"id": "a1", "text": "aaa", "metadata": {"tags": ["miura"]}}],
                    ensure_ascii=False),
@@ -60,7 +63,7 @@ def test_ingest_json_dir_counts_documents_chunks_files(monkeypatch: pytest.Monke
 
     def fake_upsert(doc_id: str, text: str, *, source=None, metadata=None, max_tokens=None) -> int:
         calls.append((doc_id, text, source, metadata))
-        return 2  # 1 doc 2 chunks 
+        return 2  # 1 doc 2 chunks
 
     monkeypatch.setattr(rag_store, "upsert_document", fake_upsert)
 
@@ -72,7 +75,9 @@ def test_ingest_json_dir_counts_documents_chunks_files(monkeypatch: pytest.Monke
     assert any((m or {}).get("file") == "b.json" for _, _, _, m in calls)
 
 
-def test_rebuild_from_json_dir_calls_reset_then_ingest(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_rebuild_from_json_dir_calls_reset_then_ingest(
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path) -> None:
     events = []
 
     monkeypatch.setattr(rag_store, "reset_collection", lambda: events.append("reset"))
@@ -84,4 +89,4 @@ def test_rebuild_from_json_dir_calls_reset_then_ingest(monkeypatch: pytest.Monke
 
     rag_store.rebuild_from_json_dir(str(tmp_path))
     assert events[0] == "reset"
-    assert events[1] == f"ingest:{str(tmp_path)}"
+    assert events[1] == f"ingest:{tmp_path!s}"

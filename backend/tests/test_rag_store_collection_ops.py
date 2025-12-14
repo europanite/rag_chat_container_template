@@ -3,7 +3,6 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
-
 import rag_store
 
 
@@ -26,7 +25,6 @@ class DummyCollectionUpsert:
 
     def upsert(self, **kwargs: Any) -> None:
         self.upsert_calls.append(kwargs)
-        # countは適当でOK（テストは呼ばれた事実を見る）
         self._count = max(self._count, len(kwargs.get("documents") or []))
 
 
@@ -46,12 +44,12 @@ class DummyCollectionNoUpsert:
         self.add_calls.append(kwargs)
         self._count += len(kwargs.get("documents") or [])
 
-
 def test_get_collection_count_returns_count(monkeypatch: pytest.MonkeyPatch) -> None:
+    COLLECTION_COUNT = 7
     dummy = DummyCollectionUpsert()
-    dummy._count = 7
+    dummy._count = COLLECTION_COUNT
     monkeypatch.setattr(rag_store, "_get_collection", lambda: dummy)
-    assert rag_store.get_collection_count() == 7
+    assert rag_store.get_collection_count() == COLLECTION_COUNT
 
 
 def test_get_collection_count_returns_zero_on_exception(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -119,13 +117,14 @@ def test_upsert_document_falls_back_to_delete_and_add(monkeypatch: pytest.Monkey
     )
 
     assert n > 0
-    assert dummy.deleted  # 先に消してから
-    assert dummy.add_calls  # addする
+    assert dummy.deleted
+    assert dummy.add_calls
 
+CHUNK_SIZE = 17
 
 def test_get_chunk_size_env_parsing(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("RAG_CHUNK_SIZE", "17")
-    assert rag_store._get_chunk_size() == 17
+    monkeypatch.setenv("RAG_CHUNK_SIZE", CHUNK_SIZE)
+    assert rag_store._get_chunk_size() == CHUNK_SIZE
 
     monkeypatch.setenv("RAG_CHUNK_SIZE", "nope")
     assert rag_store._get_chunk_size() == rag_store._DEFAULT_CHUNK_SIZE
