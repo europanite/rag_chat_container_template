@@ -57,7 +57,7 @@ def test_get_collection_count_returns_zero_on_exception(monkeypatch: pytest.Monk
         def count(self) -> int:
             raise RuntimeError("boom")
 
-    monkeypatch.setattr(rag_store, "_get_collection", lambda: Boom())
+    monkeypatch.setattr(rag_store, "_get_collection", Boom)
     assert rag_store.get_collection_count() == 0
 
 
@@ -76,7 +76,7 @@ def test_delete_by_doc_id_ignores_errors(monkeypatch: pytest.MonkeyPatch) -> Non
         def delete(self, **_kwargs: Any) -> None:
             raise RuntimeError("boom")
 
-    monkeypatch.setattr(rag_store, "_get_collection", lambda: Boom())
+    monkeypatch.setattr(rag_store, "_get_collection", Boom)
     rag_store._delete_by_doc_id("doc-1")  # 例外が外に出ないこと
 
 
